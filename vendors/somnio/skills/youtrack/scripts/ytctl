@@ -1,0 +1,402 @@
+#!/usr/bin/env bash
+# ytctl — YouTrack CLI wrapper (curl + jq) for the instance in the config
+# (Acme's is acme.youtrack.cloud). Shipped by the somnio-engineering-ai plugin's
+# `youtrack` skill; dev-execution and loop-mode run it as their YouTrack adapter.
+set -euo pipefail
+
+CONFIG_FILE="${HOME}/.config/youtrack/config.json"
+
+die() { echo "error: $*" >&2; exit 1; }
+
+command -v jq >/dev/null || die "jq is required"
+command -v curl >/dev/null || die "curl is required"
+
+# --- config ---------------------------------------------------------------
+YT_URL="${YOUTRACK_URL:-}"
+YT_TOKEN="${YOUTRACK_TOKEN:-}"
+if [[ -z "$YT_URL" || -z "$YT_TOKEN" ]] && [[ -f "$CONFIG_FILE" ]]; then
+  [[ -z "$YT_URL" ]] && YT_URL=$(jq -r '.url // empty' "$CONFIG_FILE")
+  [[ -z "$YT_TOKEN" ]] && YT_TOKEN=$(jq -r '.token // empty' "$CONFIG_FILE")
+fi
+# The board field `update … state` moves: Acme names it "Stage"; YouTrack's default is "State".
+YT_STATE_FIELD="${YOUTRACK_STATE_FIELD:-}"
+if [[ -z "$YT_STATE_FIELD" && -f "$CONFIG_FILE" ]]; then
+  YT_STATE_FIELD=$(jq -r '.state_field // empty' "$CONFIG_FILE")
+fi
+YT_STATE_FIELD="${YT_STATE_FIELD:-Stage}"
+[[ "$YT_STATE_FIELD" =~ ^[A-Za-z][A-Za-z0-9_-]*$ ]] || die "state_field must be a field name, got '$YT_STATE_FIELD'"
+[[ -n "$YT_URL" && -n "$YT_TOKEN" ]] || die "missing credentials: set YOUTRACK_URL/YOUTRACK_TOKEN or create $CONFIG_FILE"
+YT_URL="${YT_URL%/}"
+
+# Keep in sync with yt_api() in youtrack-ticket-hardening/scripts/yt-lib.sh, where installed.
+api() { # api METHOD PATH [JSON_BODY]
+  local method=$1 path=$2 body="${3:-}"
+  # Every URL passes through here, so this is where an issue id in the path
+  # is checked — the whole path, so "ACME-1/../x" or "ACME-1?x" can't smuggle in
+  # more. Valid ids are URL-safe, so they need no encoding.
+  if [[ "$path" == /issues/* ]]; then
+    local seg=${path#/issues/}; valid_id "${seg%%[/?#&]*}"
+    [[ "$path" =~ ^/issues/[^/?#\&]+(/(comments|links))?(\?[^?#]*)?$ ]] || die "unexpected API path: $path"
+  fi
+  local args=(-s --fail-with-body --proto '=https' --max-time 30 -X "$method"
+    -H "Accept: application/json")
+  [[ -n "$body" ]] && args+=(-H "Content-Type: application/json" --data-binary "$body")
+  local out rc=0
+  # The token goes in through a pipe (printf is a builtin), never argv, so
+  # `ps` can't see it. -q (ignore ~/.curlrc) must be curl's first argument.
+  out=$(curl -q "${args[@]}" -H @<(printf 'Authorization: Bearer %s\n' "$YT_TOKEN") \
+    -w '\n%{http_code}' "${YT_URL}/api${path}") || rc=$?
+  local code=${out##*$'\n'}; out=${out%$'\n'*}
+  if [[ $rc -ne 0 ]]; then
+    echo "$out" | jq -r '.error_description // .error // .' >&2 2>/dev/null || echo "$out" >&2
+    # 6/7/35 (DNS, connect, TLS): nothing was sent. 22 with a 4xx: the server
+    # refused it. A 408/5xx, a timeout or a dropped connection may come after a
+    # write committed, so its outcome is unknown.
+    local unknown=0
+    case $rc in
+      6|7|35) ;;
+      22) [[ "$code" == 408 || "$code" == 5* ]] && unknown=1 ;;
+      *) unknown=1 ;;
+    esac
+    [[ $unknown -eq 1 && "$method" != GET ]] \
+      && die "outcome unknown (curl exit $rc, HTTP $code): $method $path — read the issue back before retrying"
+    die "API request failed (curl exit $rc, HTTP $code): $method $path"
+  fi
+  echo "$out"
+}
+
+urlenc() { jq -rn --arg v "$1" '$v|@uri'; }
+
+# Only readable keys like ACME-123 reach a URL path (see api()) or a command.
+ISSUE_ID_RE='^[A-Za-z][A-Za-z0-9_]*-[0-9]+$'
+valid_id() { [[ "$1" =~ $ISSUE_ID_RE ]] || die "not an issue id: '$1' (expected e.g. ACME-123)"; }
+
+ISSUE_FIELDS='idReadable,summary,created,updated,resolved,reporter(login),customFields(name,value(name,login,fullName))'
+
+# jq helper: extract a custom field value by name from an issue object.
+# stage() reads the configured state field first, then "Stage" (Acme) and "State"
+# (YouTrack's default). Every jq that uses it passes --arg sf "$YT_STATE_FIELD".
+JQ_CF='def cf($n): (.customFields[]? | select(.name==$n) | .value | if type=="array" then map(.name // .login)|join(",") elif type=="object" then (.name // .login // .fullName) else . end) // "-";
+def stage: [cf($sf), cf("Stage"), cf("State")] | map(select(. != "-")) | (.[0] // "-");'
+
+issues_table() {
+  jq -r --arg sf "$YT_STATE_FIELD" "$JQ_CF"' (["ID","STAGE","PRIORITY","ASSIGNEE","SUMMARY"] | @tsv),
+    (.[] | [.idReadable, (stage|tostring), (cf("Priority")|tostring), (cf("Assignee")|tostring), (.summary|.[0:80])] | @tsv)' \
+  | column -t -s $'\t'
+}
+
+resolve_project_id() { # shortName or name -> internal id
+  api GET "/admin/projects?fields=id,shortName,name" \
+    | jq -r --arg p "$1" '.[] | select(.shortName==$p or .name==$p) | .id' | head -1
+}
+
+search_issues() { # query max
+  local q max="${2:-100}"
+  q=$(urlenc "$1")
+  api GET "/issues?query=${q}&\$top=${max}&fields=${ISSUE_FIELDS}"
+}
+
+run_command() { # issueId command
+  valid_id "$1"
+  api POST "/commands" "$(jq -cn --arg id "$1" --arg q "$2" '{query:$q, issues:[{idReadable:$id}]}')" >/dev/null
+}
+
+field_command() { # field value -> YouTrack command string
+  case "$1" in
+    assignee) echo "for $2" ;;
+    state|stage) echo "$YT_STATE_FIELD $2" ;;   # Stage unless state_field says otherwise
+    priority|type|subsystem) echo "$(echo "${1:0:1}" | tr '[:lower:]' '[:upper:]')${1:1} $2" ;;
+    *) die "unsupported field '$1' (use: state/stage, assignee, priority, type, subsystem, summary, description)" ;;
+  esac
+}
+
+# Commands answer 200 even when YouTrack reads them differently than meant,
+# so every field write is read back and compared.
+field_now() { # issueId field -> its current value
+  local fields='customFields(name,value(name,login))'
+  [[ "$2" == summary || "$2" == description ]] && fields=$2
+  api GET "/issues/$1?fields=${fields}" \
+    | jq -r --arg f "$2" --arg sf "$YT_STATE_FIELD" "$JQ_CF"'
+        if $f == "summary" or $f == "description" then (.[$f] // "")
+        elif $f == "assignee" then ([.customFields[]? | select(.name == "Assignee") | .value.login] | .[0] // "-")
+        elif $f == "state" or $f == "stage" then stage
+        else cf(($f[0:1] | ascii_upcase) + $f[1:]) end'
+}
+
+# Drop CRs, trailing whitespace and trailing blank lines before comparing text.
+# Same as normalize() in youtrack-ticket-hardening/scripts/yt-lib.sh.
+normalize() {
+  tr -d '\r' | sed -e 's/[[:space:]]*$//' \
+    | awk '{ l[NR]=$0 } END { n=NR; while (n>0 && l[n]=="") n--; for (i=1;i<=n;i++) print l[i] }'
+}
+
+expect_field() { # issueId field value
+  local now want=$3
+  now=$(field_now "$1" "$2") || die "write sent to $1, but its read-back failed — check with: ytctl issue $1"
+  if [[ "$2" == summary || "$2" == description ]]; then
+    now=$(normalize <<<"$now"); want=$(normalize <<<"$want")
+  else  # enum values: the command dialog ignores case
+    now=$(tr '[:upper:]' '[:lower:]' <<<"$now"); want=$(tr '[:upper:]' '[:lower:]' <<<"$want")
+  fi
+  [[ "$now" == "$want" ]] || die "read-back mismatch on $1: $2 is '$now', expected '$3'"
+}
+
+# `for X` accepts me, logins, emails and names; read-back sees only the login.
+# Resolve it before writing so a mismatch means the write really failed.
+assignee_login() { # value -> login ("-" for Unassigned)
+  local v=$1 hits
+  [[ "$(tr '[:upper:]' '[:lower:]' <<<"$v")" == unassigned ]] && { echo "-"; return; }
+  [[ "$v" == me ]] && { api GET "/users/me?fields=login" | jq -r .login; return; }
+  hits=$(api GET "/users?fields=login,fullName,email&\$top=50&query=$(urlenc "$v")" \
+    | jq -r --arg v "$v" '[.[] | select(.login == $v or .email == $v or .fullName == $v) | .login] | unique | .[]')
+  local n; n=$(grep -c . <<<"$hits")
+  [[ $n -eq 1 ]] || die "assignee '$v' matches $n users — use a login (see Team logins)"
+  echo "$hits"
+}
+
+# The POST answers with the comment as stored, so compare against that.
+post_comment() { # issueId text
+  local back
+  back=$(api POST "/issues/$1/comments?fields=id,text" "$(jq -cn --arg t "$2" '{text:$t}')" | jq -r '.text // ""')
+  [[ "$(normalize <<<"$back")" == "$(normalize <<<"$2")" ]] \
+    || die "read-back mismatch: the comment stored on $1 differs from the text sent"
+}
+
+# --- flag parsing (shared) ------------------------------------------------
+JSON=0; MAX=100; QUERY=""; DRY_RUN=0; DAYS=7; ALL_COMMENTS=0
+ASSIGNEE=""; STAGE=""; LINKS=()
+POS=()
+CMD="${1:-help}"; shift || true
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --json) JSON=1 ;;
+    --assignee) ASSIGNEE="$2"; shift ;;
+    --stage) STAGE="$2"; shift ;;
+    --parent) valid_id "$2"; LINKS+=("subtask of $2"); shift ;;
+    --link) valid_id "${2##* }"; LINKS+=("$2"); shift ;;   # e.g. --link "depends on ACME-828"
+    --max) MAX="$2"; shift ;;
+    --query) QUERY="$2"; shift ;;
+    --dry-run) DRY_RUN=1 ;;
+    --all-comments) ALL_COMMENTS=1 ;;
+    --days) DAYS="$2"; shift ;;
+    *) POS+=("$1") ;;
+  esac
+  shift
+done
+set -- "${POS[@]+"${POS[@]}"}"
+
+case "$CMD" in
+
+me)
+  # Which account the configured token acts as — check it before relying on results.
+  out=$(api GET "/users/me?fields=login,fullName,email")
+  if [[ $JSON -eq 1 ]]; then echo "$out" | jq .; else
+    echo "$out" | jq -r '"\(.login) (\(.fullName // "-")) on '"${YT_URL}"'"'
+  fi ;;
+
+projects)
+  out=$(api GET "/admin/projects?fields=id,shortName,name,archived")
+  if [[ $JSON -eq 1 ]]; then echo "$out" | jq .; else
+    echo "$out" | jq -r '(["KEY","NAME","ARCHIVED"]|@tsv),(.[]|[.shortName,.name,(.archived|tostring)]|@tsv)' | column -t -s $'\t'
+  fi ;;
+
+issues)
+  q="${QUERY}"
+  [[ $# -ge 1 ]] && q="project: $1 ${q}"
+  [[ -z "$q" ]] && q="#unresolved sort by: updated desc"
+  out=$(search_issues "$q" "$MAX")
+  if [[ $JSON -eq 1 ]]; then echo "$out" | jq .; else echo "$out" | issues_table; fi ;;
+
+issue)
+  [[ $# -ge 1 ]] || die "usage: ytctl issue ISSUE-ID [--all-comments]"
+  # Only the 10 newest comments unless --all-comments; comments_total says how many exist.
+  api GET "/issues/$1?fields=${ISSUE_FIELDS},description,tags(name),links(direction,linkType(name),issues(idReadable)),comments(author(login),text,created)" \
+    | jq --argjson all "$ALL_COMMENTS" '.links |= map(select(.issues|length>0))
+        | .comments_total = (.comments | length)
+        | if $all == 1 then . else .comments |= .[-10:] end' ;;
+
+create)
+  [[ $# -ge 2 ]] || die "usage: ytctl create PROJECT \"summary\" [\"description\"]"
+  pid=$(resolve_project_id "$1")
+  [[ -n "$pid" ]] || die "project not found: $1"
+  [[ -n "$ASSIGNEE" ]] && login=$(assignee_login "$ASSIGNEE")
+  body=$(jq -cn --arg pid "$pid" --arg s "$2" --arg d "${3:-}" '{project:{id:$pid},summary:$s} + (if $d != "" then {description:$d} else {} end)')
+  new=$(api POST "/issues?fields=idReadable,summary" "$body")
+  id=$(echo "$new" | jq -r .idReadable)
+  echo "$new" | jq -r '"created \(.idReadable): \(.summary)"'
+  # From here on the issue exists: a failure must not lead to a second create.
+  trap '[[ $? -eq 0 ]] || echo "error: ${id} was created; finish the remaining steps with ytctl update/link — do not re-run create" >&2' EXIT
+  if [[ -n "$ASSIGNEE" ]]; then
+    run_command "$id" "for ${ASSIGNEE}"; expect_field "$id" assignee "$login"; echo "  assignee = ${login}"
+  fi
+  if [[ -n "$STAGE" ]]; then
+    run_command "$id" "$(field_command stage "$STAGE")"; expect_field "$id" stage "$STAGE"; echo "  stage = ${STAGE}"
+  fi
+  for l in "${LINKS[@]+"${LINKS[@]}"}"; do run_command "$id" "$l"; echo "  ${l}"; done ;;
+
+update)
+  [[ $# -ge 3 ]] || die "usage: ytctl update ISSUE-ID FIELD VALUE"
+  id=$1; field=$2; shift 2; value="$*"
+  case "$field" in
+    summary|description)
+      api POST "/issues/${id}?fields=idReadable" "$(jq -cn --arg f "$field" --arg v "$value" '{($f):$v}')" >/dev/null ;;
+    *)
+      cmd=$(field_command "$field" "$value")
+      [[ "$field" == assignee ]] && value=$(assignee_login "$value")
+      run_command "$id" "$cmd" ;;
+  esac
+  expect_field "$id" "$field" "$value"
+  echo "updated ${id}: ${field} = ${value}" ;;
+
+comment)
+  [[ $# -ge 2 ]] || die "usage: ytctl comment ISSUE-ID \"text\""
+  post_comment "$1" "$2"
+  echo "commented on $1" ;;
+
+search)
+  [[ $# -ge 1 ]] || die "usage: ytctl search \"query\""
+  out=$(search_issues "$1" "$MAX")
+  if [[ $JSON -eq 1 ]]; then echo "$out" | jq .; else echo "$out" | issues_table; fi ;;
+
+states)
+  # Per-project field listing needs admin rights; the state bundles endpoint
+  # is readable with a regular token and this instance has a single bundle.
+  api GET "/admin/customFieldSettings/bundles/state?fields=name,values(name,isResolved)" \
+    | jq -r '.[] | .values[] | "\(.name)\(if .isResolved then " (resolved)" else "" end)"' ;;
+
+users)
+  q=""
+  [[ -n "$QUERY" ]] && q="&query=$(urlenc "$QUERY")"
+  out=$(api GET "/users?fields=login,fullName,email,banned&\$top=${MAX}${q}")
+  if [[ $JSON -eq 1 ]]; then echo "$out" | jq .; else
+    echo "$out" | jq -r '(["LOGIN","NAME","EMAIL"]|@tsv),(.[]|select(.banned|not)|[.login,.fullName,(.email // "-")]|@tsv)' | column -t -s $'\t'
+  fi ;;
+
+bulk-update|bulk-assign|bulk-comment)
+  [[ $# -ge 2 ]] || die "usage: ytctl ${CMD} \"query\" ARGS..."
+  q="$1"; shift
+  case "$CMD" in
+    bulk-update) [[ $# -ge 2 ]] || die "usage: ytctl bulk-update \"query\" FIELD VALUE"; action="$(field_command "$1" "$2")"; label="set $1 = $2"; check=("$1" "$2") ;;
+    bulk-assign) action="for $1"; label="assign to $1"; check=(assignee "$(assignee_login "$1")") ;;
+    bulk-comment) action=""; comment_text="$1"; label="comment" ;;
+  esac
+  ids=$(search_issues "$q" "$MAX" | jq -r '.[].idReadable')
+  [[ -n "$ids" ]] || { echo "no issues match: $q"; exit 0; }
+  count=$(echo "$ids" | wc -l | tr -d ' ')
+  if [[ $DRY_RUN -eq 1 ]]; then
+    echo "[dry-run] would ${label} on ${count} issue(s):"; echo "$ids"; exit 0
+  fi
+  while read -r id; do
+    if [[ "$CMD" == "bulk-comment" ]]; then
+      post_comment "$id" "$comment_text"
+    else
+      run_command "$id" "$action"; expect_field "$id" "${check[@]}"
+    fi
+    echo "✓ $id"
+  done <<< "$ids"
+  echo "done: ${label} on ${count} issue(s)" ;;
+
+link|unlink)
+  # Link verbs are YouTrack command phrases: "relates to", "depends on",
+  # "is required for", "subtask of", "parent for", "duplicates", "is duplicated by".
+  [[ $# -ge 3 ]] || die "usage: ytctl ${CMD} ISSUE-ID \"link phrase\" TARGET-ID [TARGET-ID...]"
+  id=$1; phrase=$2; shift 2
+  prefix=""; [[ "$CMD" == "unlink" ]] && prefix="remove "
+  for target in "$@"; do valid_id "$target"; done   # all of them before the first write
+  for target in "$@"; do
+    run_command "$id" "${prefix}${phrase} ${target}"
+    echo "${CMD}ed ${id} ${phrase} ${target}"
+  done ;;
+
+links)
+  [[ $# -ge 1 ]] || die "usage: ytctl links ISSUE-ID [--json]"
+  out=$(api GET "/issues/$1/links?fields=direction,linkType(name,sourceToTarget,targetToSource),issues(idReadable,summary)")
+  if [[ $JSON -eq 1 ]]; then echo "$out" | jq .; else
+    echo "$out" | jq -r '.[] | select(.issues|length>0)
+      | (if .direction=="INWARD" then .linkType.targetToSource else .linkType.sourceToTarget end) as $verb
+      | .issues[] | [$verb, .idReadable, (.summary|.[0:80])] | @tsv' | column -t -s $'\t'
+  fi ;;
+
+link-types)
+  api GET "/issueLinkTypes?fields=name,sourceToTarget,targetToSource" \
+    | jq -r '.[] | "\(.name): \(.sourceToTarget)\(if .targetToSource != "" then " / " + .targetToSource else "" end)"' ;;
+
+tag|untag)
+  [[ $# -ge 2 ]] || die "usage: ytctl ${CMD} ISSUE-ID TAG"
+  id=$1; shift; t="$*"
+  run_command "$id" "${CMD} ${t}"
+  echo "${CMD}ged ${id}: ${t}" ;;
+
+command)
+  # Raw YouTrack command (anything the UI command dialog accepts), on one or more issues.
+  [[ $# -ge 2 ]] || die "usage: ytctl command \"command text\" ISSUE-ID [ISSUE-ID...]"
+  c=$1; shift
+  for id in "$@"; do valid_id "$id"; done   # all of them before the first write, even on --dry-run
+  for id in "$@"; do
+    [[ $DRY_RUN -eq 1 ]] && { echo "[dry-run] ${id}: ${c}"; continue; }
+    run_command "$id" "$c"; echo "✓ ${id}: ${c}"
+  done ;;
+
+report)
+  [[ $# -ge 1 ]] || die "usage: ytctl report PROJECT [--days N]"
+  proj=$1
+  since=$(date -v-"${DAYS}"d +%Y-%m-%d 2>/dev/null || date -d "-${DAYS} days" +%Y-%m-%d)
+  created=$(search_issues "project: $proj created: ${since} .. Today" 1000 | jq 'length')
+  resolved=$(search_issues "project: $proj resolved date: ${since} .. Today" 1000 | jq 'length')
+  updated=$(search_issues "project: $proj updated: ${since} .. Today" 1000 | jq 'length')
+  open=$(search_issues "project: $proj #unresolved" 1000 | jq 'length')
+  echo "Project ${proj} — last ${DAYS} days"
+  echo "  created:    ${created}"
+  echo "  resolved:   ${resolved}"
+  echo "  updated:    ${updated}"
+  echo "  open total: ${open}" ;;
+
+report-user)
+  [[ $# -ge 1 ]] || die "usage: ytctl report-user USER [--days N]"
+  user=$1
+  since=$(date -v-"${DAYS}"d +%Y-%m-%d 2>/dev/null || date -d "-${DAYS} days" +%Y-%m-%d)
+  assigned=$(search_issues "assignee: $user #unresolved" 1000 | jq 'length')
+  resolved=$(search_issues "assignee: $user resolved date: ${since} .. Today" 1000 | jq 'length')
+  updated=$(search_issues "updated by: $user updated: ${since} .. Today" 1000)
+  echo "User ${user} — last ${DAYS} days"
+  echo "  open assigned:  ${assigned}"
+  echo "  resolved:       ${resolved}"
+  echo "  touched:        $(echo "$updated" | jq 'length')"
+  echo "$updated" | issues_table | head -20 ;;
+
+report-states)
+  [[ $# -ge 1 ]] || die "usage: ytctl report-states PROJECT"
+  search_issues "project: $1" 1000 \
+    | jq -r --arg sf "$YT_STATE_FIELD" "$JQ_CF"'.[] | stage' | sort | uniq -c | sort -rn \
+    | awk '{n=$1; $1=""; bar=""; for(i=0;i<n && i<60;i++) bar=bar "█"; printf "%-20s %4d %s\n", substr($0,2), n, bar}' ;;
+
+help|*)
+  cat <<'EOF'
+ytctl — YouTrack CLI
+
+  ytctl me [--json]
+  ytctl projects [--json]
+  ytctl issues [PROJECT] [--query "..."] [--max N] [--json]
+  ytctl issue ISSUE-ID [--all-comments]
+  ytctl create PROJECT "summary" ["description"] [--assignee LOGIN] [--stage "To Do"]
+                [--parent ISSUE-ID] [--link "depends on ACME-828"]...   (description: "$(cat file.md)")
+  ytctl update ISSUE-ID FIELD VALUE      (state|assignee|priority|type|summary|description)
+  ytctl comment ISSUE-ID "text"
+  ytctl link ISSUE-ID "relates to|depends on|is required for|subtask of|parent for|duplicates" TARGET...
+  ytctl unlink ISSUE-ID "link phrase" TARGET...
+  ytctl links ISSUE-ID [--json]
+  ytctl link-types
+  ytctl tag|untag ISSUE-ID TAG
+  ytctl command "raw YouTrack command" ISSUE-ID... [--dry-run]
+  ytctl search "query" [--max N] [--json]
+  ytctl states PROJECT
+  ytctl users [--query "..."] [--json]
+  ytctl bulk-update "query" FIELD VALUE [--dry-run]
+  ytctl bulk-assign "query" USER [--dry-run]
+  ytctl bulk-comment "query" "text" [--dry-run]
+  ytctl report PROJECT [--days N]
+  ytctl report-user USER [--days N]
+  ytctl report-states PROJECT
+EOF
+  ;;
+esac

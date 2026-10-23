@@ -1,0 +1,8 @@
+{
+  "comment": "sha256 of each lowercased client token that must never appear in this public repository, mapped to its neutral placeholder. Add one with: printf '%s' <token> | shasum -a 256",
+  "tokens": {
+    "4f74153f1aa1279a9056cd16edf7dc94bd234fa71dda1bb446d6fbe4f1c4d887": "acme",
+    "3b05fe722433e3a6d3bc5b7679aa44c562b40e3979763feeeda77959476b5bed": "acme",
+    "ea25b88fb98ce0c5d7bca74dbd151310af91817fa24bed434196a649daf3a106": "mobileapp"
+  }
+}

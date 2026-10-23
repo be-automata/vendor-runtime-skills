@@ -1,0 +1,128 @@
+{
+  "_comment": "The broker's complete allowlist. Lifted verbatim from skills/uat/scripts/check_infra_cli.py PROVIDERS; tests/broker/broker-test.sh asserts the two stay identical. Every command is read-only and takes NO caller input \u2014 that is what makes fixed-argv enforceable.",
+  "providers": {
+    "aws": {
+      "auth": [
+        "aws",
+        "sts",
+        "get-caller-identity",
+        "--output",
+        "json"
+      ],
+      "cli": "aws",
+      "version": [
+        "aws",
+        "--version"
+      ]
+    },
+    "azure": {
+      "auth": [
+        "az",
+        "account",
+        "show",
+        "--output",
+        "json"
+      ],
+      "cli": "az",
+      "version": [
+        "az",
+        "version",
+        "--output",
+        "json"
+      ]
+    },
+    "cloudflare": {
+      "auth": [
+        "wrangler",
+        "whoami"
+      ],
+      "cli": "wrangler",
+      "version": [
+        "wrangler",
+        "--version"
+      ]
+    },
+    "fly": {
+      "auth": [
+        "flyctl",
+        "auth",
+        "whoami"
+      ],
+      "cli": "flyctl",
+      "version": [
+        "flyctl",
+        "version"
+      ]
+    },
+    "gcp": {
+      "auth": [
+        "gcloud",
+        "auth",
+        "list",
+        "--filter=status:ACTIVE",
+        "--format=value(account)"
+      ],
+      "cli": "gcloud",
+      "version": [
+        "gcloud",
+        "--version"
+      ]
+    },
+    "github": {
+      "auth": [
+        "gh",
+        "auth",
+        "status"
+      ],
+      "cli": "gh",
+      "version": [
+        "gh",
+        "--version"
+      ]
+    },
+    "kubernetes": {
+      "auth": [
+        "kubectl",
+        "cluster-info",
+        "--request-timeout=10s"
+      ],
+      "cli": "kubectl",
+      "version": [
+        "kubectl",
+        "version",
+        "--client",
+        "--output=json"
+      ]
+    },
+    "neon": {
+      "auth": [
+        "neonctl",
+        "me"
+      ],
+      "cli": "neonctl",
+      "version": [
+        "neonctl",
+        "--version"
+      ]
+    },
+    "terraform": {
+      "auth": null,
+      "cli": "terraform",
+      "version": [
+        "terraform",
+        "version"
+      ]
+    },
+    "vercel": {
+      "auth": [
+        "vercel",
+        "whoami"
+      ],
+      "cli": "vercel",
+      "version": [
+        "vercel",
+        "--version"
+      ]
+    }
+  }
+}

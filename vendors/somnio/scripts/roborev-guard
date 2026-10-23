@@ -1,0 +1,106 @@
+#!/bin/sh
+# roborev-guard — ADR-0005 D-6's activation blocker, made mechanical.
+#
+# WHY THIS EXISTS. D-6 says a tracked `[[hooks]]` block in a target's
+# `.roborev.toml` is arbitrary shell that a daemon executes on a developer
+# laptop, from a file any contributor can edit and nobody reviews as code. The
+# decision was raised from a doctor warning to an activation blocker on
+# 2026-09-10 (#50) because the doctor fires at session start, so a review event
+# between two doctor runs executes the shell first. The DECISION landed then;
+# this is the mechanism, owed since.
+#
+# THE CAUSAL CHAIN, which is why refusing to enqueue is a real blocker rather
+# than a second warning: the daemon runs `[[hooks]]` commands on review EVENTS,
+# so refusing the enqueue prevents the review, which prevents the event, which
+# prevents the shell.
+#
+# HOW IT IS REACHED. `roborev install-hook --binary <path>` bakes a binary path
+# into the git hook; upstream provides that flag for version-manager shims and
+# the harness uses the same indirection to point the hook here. Per D-6's
+# 2026-09-16 amendment, Somnio SKILLS also call this rather than the binary: a
+# skill step is not a person, so the "attended use" exemption does not cover it.
+#
+# WHAT IT IS NOT. Not a boundary against someone who already executes as this
+# user — they can edit this file, or `.git/hooks`, or call roborev directly.
+# The same honesty ADR-0004 D-3 states for the broker applies here: the value is
+# that the harness's own automated paths cannot route around the decision, not
+# containment of a local attacker. `.git/hooks` is untracked and does not travel
+# in a pull request, which is the exposure D-6 actually names.
+#
+# ARGV. Unlike the broker (fixed argv, no pass-through), this wrapper must carry
+# real arguments: the hook calls `post-commit`, and skills call
+# `review --branch --wait`. So argv is passed through, but only for an
+# allowlisted first word — a general roborev pass-through would let a skill
+# reach any subcommand through a harness-blessed path.
+#
+# THE ALLOWLIST MUST COVER EVERY OP THE HOOKS IT REPLACES INVOKE. `install-hook`
+# writes THREE hooks and they call `post-commit`, `remap` (from post-rewrite)
+# and a flush (from pre-push). Shipping an allowlist of only `post-commit review`
+# (0.9.19.0) left post-rewrite refusing silently — the hook swallows stderr with
+# `2>/dev/null`, so ADR-0005 Q-6's re-verification across a rebase simply stopped
+# happening, in the one repository where the pilot is measured. Narrowing this
+# list is not a safety improvement: the safety property is the `[[hooks]]` check
+# below, which applies to every op equally. An op the hooks call and the guard
+# refuses is a broken hook, not a blocked one.
+set -u
+
+ALLOWED_OPS="post-commit post-rewrite pre-push remap review"
+
+# The pinned binary, resolved from a constant PATH rather than the caller's.
+# A git hook runs with whatever environment the committing process had; taking
+# roborev from an inherited PATH would let that environment choose the binary
+# this guard blesses.
+GUARD_PATH="${SOMNIO_GUARD_PATH_FOR_TESTS:-$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin}"
+
+die() { printf 'roborev-guard: %s\n' "$1" >&2; exit "${2:-64}"; }
+
+OP="${1:-}"
+[ -n "$OP" ] || die "usage: roborev-guard <$(echo "$ALLOWED_OPS" | tr ' ' '|')> [args...]"
+
+_ok=0
+for _a in $ALLOWED_OPS; do [ "$OP" = "$_a" ] && _ok=1 && break; done
+[ "$_ok" -eq 1 ] || die "refusing '$OP': only these operations route through the guard ($ALLOWED_OPS). A skill that needs another subcommand needs an ADR-0005 D-6 amendment, not a wider guard." 64
+
+# The repository whose config governs this invocation. --show-toplevel, not the
+# cwd: a hook may run from a subdirectory, and a linked worktree must be graded
+# by its OWN .roborev.toml (a worktree does not inherit the main checkout's).
+REPO="$(git rev-parse --show-toplevel 2>/dev/null)" || REPO=""
+[ -n "$REPO" ] || die "not inside a git repository" 64
+CFG="$REPO/.roborev.toml"
+
+# The [[hooks]] test. TOML's array-of-tables is DOUBLE brackets, which the
+# single-bracket matcher in install-roborev.sh cannot match — there is nothing
+# to share here, and a test asserts that this matcher rejects what that one
+# accepts and vice versa. `[hooks]` (a plain table) is refused too: a repository
+# spelling it either way is declaring hooks, and guessing which spelling the
+# daemon honours is not this guard's job.
+# Leading whitespace and a trailing comment are allowed because both are legal
+# TOML and an indented header is still a header — the same class of miss that
+# was fixed twice already in install-roborev.sh.
+HOOKS_RE='^[[:space:]]*\[\[?[[:space:]]*"?hooks"?[[:space:]]*\]\]?[[:space:]]*(#.*)?$'
+
+if [ -f "$CFG" ] && grep -qE "$HOOKS_RE" "$CFG"; then
+  printf 'roborev-guard: REFUSED — %s declares a hooks block.\n' "$CFG" >&2
+  printf '  ADR-0005 D-6: a tracked [[hooks]] entry is arbitrary shell run by the\n' >&2
+  printf '  daemon on review events, from a file no one reviews as code. Refusing\n' >&2
+  printf '  the enqueue is what prevents the event, and so the shell.\n' >&2
+  printf '  Remove the block, or unregister this repository. This guard does not\n' >&2
+  printf '  edit the config: D-6 says detected and reported, never removed.\n' >&2
+  # post-commit runs AFTER the commit and git ignores its status, but exit 0
+  # keeps it out of any wrapper that does check. A skill-invoked op gets a
+  # NONZERO exit: a refusal the caller cannot see is the warning-shaped failure
+  # D-6's amendment was written to end.
+  [ "$OP" = "post-commit" ] && exit 0
+  exit 3
+fi
+
+ROBOREV="$(PATH="$GUARD_PATH" command -v roborev 2>/dev/null)" || ROBOREV=""
+[ -n "$ROBOREV" ] && [ -x "$ROBOREV" ] || {
+  # Never fail a commit because the battery is absent: D-11 records that the
+  # hook "silently exits on any error so hooks never block commits", and this
+  # guard must not be the thing that changes that.
+  [ "$OP" = "post-commit" ] && exit 0
+  die "roborev not found on the guard's PATH ($GUARD_PATH)" 69
+}
+
+exec "$ROBOREV" "$@"

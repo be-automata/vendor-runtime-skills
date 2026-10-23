@@ -1,0 +1,725 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://somnio.software/schemas/harness-manifest.schema.json",
+  "title": "Somnio harness manifest",
+  "description": "The committed provenance record at .claude/harness.json in a harnessed target repo: where each installed file came from, at which upstream rev, and its content hash. The run verdict is not here \u2014 it lives in the gitignored .claude/.harness/init-<ts>.json.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "generated_by",
+    "generated_at",
+    "rules_source",
+    "installed"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Manifest schema version. Not a const, so a v1 manifest keeps validating after a v2 exists."
+    },
+    "generated_by": {
+      "type": "string",
+      "pattern": "^somnio-engineering-ai@.+$",
+      "description": "The tool and version that wrote this manifest, e.g. somnio-engineering-ai@0.8.6.0."
+    },
+    "generated_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "RFC 3339 / ISO 8601 UTC timestamp of the run that wrote this manifest."
+    },
+    "rules_source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repo",
+        "rev",
+        "path",
+        "tier"
+      ],
+      "properties": {
+        "repo": {
+          "type": "string",
+          "description": "The upstream repository, e.g. somnio-software/somnio-ai-tools."
+        },
+        "rev": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{7,40}$",
+          "description": "Exact commit the content came from."
+        },
+        "path": {
+          "type": "string",
+          "description": "Path within that repo the rules were read from, repo-relative and never a machine path: agent-rules/rules."
+        },
+        "tier": {
+          "type": "string",
+          "enum": [
+            "env",
+            "owned-clone",
+            "pub-cache",
+            "working-copy"
+          ],
+          "description": "Which resolution tier answered."
+        }
+      }
+    },
+    "stacks": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "uniqueItems": true,
+      "description": "The stacks detected and served, e.g. [\"nestjs\"]."
+    },
+    "installed": {
+      "type": "array",
+      "uniqueItems": true,
+      "description": "Files this run installed. May be empty when --rules-only targets an unserved stack.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "path",
+          "origin",
+          "source_rev",
+          "sha256"
+        ],
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Repo-relative target path, e.g. .claude/rules/nestjs/testing-unit.md."
+          },
+          "origin": {
+            "type": "string",
+            "description": "Where the bytes came from, e.g. somnio-software/somnio-ai-tools:<rev>:agent-rules/rules/nestjs/testing-unit.md, or template:<name> for a templated file."
+          },
+          "source_rev": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{7,40}$",
+            "description": "Rev of that file's source. Per-entry so a partially re-run install is still describable."
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$",
+            "description": "Hash of the bytes as written."
+          },
+          "created": {
+            "const": true,
+            "description": "Present and true only when this run wrote the whole file (a greenfield CLAUDE.md, .gitignore or adapter block) and every byte in it is still the harness's. --uninstall deletes such a file outright instead of stripping the managed block out of it; absent means the file is the repository's and only the block is ours."
+          },
+          "sha256_pre_optimize": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$",
+            "description": "Optional: the sha256 of the verbatim source file, before install_assets.py normalized its frontmatter (globs: -> a paths: list). Equal to sha256 when nothing was rewritten; absent for a file with no upstream source."
+          }
+        }
+      }
+    },
+    "pre_existing": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Repo-relative paths that were already present and were left alone."
+    },
+    "not_in_scope": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Repo-relative paths the run deliberately did not manage."
+    },
+    "agents": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "uniqueItems": true,
+      "description": "Agent ids this run configured, e.g. [\"claude\", \"codex\"]. Order is the order the person chose."
+    },
+    "cli_version": {
+      "type": "string",
+      "description": "The somnio CLI binary version that ran the skills step, as reported by `somnio --version`. Absent when the binary was not on PATH."
+    },
+    "cli_pin": {
+      "type": "string",
+      "description": "The harness's SOMNIO_CLI_VERSION pin from install.sh at the time of the run. Recorded for drift: a cli_version different from it is a warning, never a failure."
+    },
+    "settings_bak_created": {
+      "type": "boolean",
+      "description": "True when this harness wrote .claude/settings.json.bak (and it is still there). --uninstall deletes that backup after restoring from it, and never deletes one it did not create."
+    },
+    "cli_installed": {
+      "type": "array",
+      "description": "Paths the somnio CLI wrote under this repo during the skills step. These files are owned by the CLI's own .somnio-skills.json manifest: harness-init records them and never deletes them on --uninstall.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "agent",
+          "skill",
+          "path",
+          "manifest"
+        ],
+        "properties": {
+          "agent": {
+            "type": "string",
+            "description": "The agent id the CLI installed for."
+          },
+          "skill": {
+            "type": "string",
+            "description": "The skill name as the CLI's manifest records it, e.g. python-best-practices."
+          },
+          "path": {
+            "type": "string",
+            "description": "Repo-relative path the CLI wrote, e.g. .claude/skills/python-best-practices."
+          },
+          "manifest": {
+            "type": "string",
+            "description": "Repo-relative path of the CLI manifest that lists this entry, e.g. .claude/skills/.somnio-skills.json. verify_harness.py's check-9 re-reads it."
+          }
+        }
+      }
+    },
+    "objective": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The --objective the run rendered into a created CLAUDE.md, recorded so a later flagless re-apply carries it forward instead of falling back to the placeholder. Absent when the run was given the default placeholder."
+    },
+    "commands": {
+      "type": "array",
+      "description": "The normalized --commands of the last run that passed the flag: what the CLAUDE.md \"Verification commands\" table and the ship-gate draft's _candidates were rendered from. A flagless re-apply reads them back (an explicit --commands always wins). Absent when no run ever passed the flag.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "command",
+          "proves"
+        ],
+        "properties": {
+          "command": {
+            "type": "string",
+            "description": "The verification command, verbatim."
+          },
+          "proves": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "What a green run proves, or null when the run was given a bare string."
+          }
+        }
+      }
+    },
+    "network": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "The target's detected network policy (HN-11b): which vendors the repository talks to, what harness-init seeded into .claude/settings.json for them, and the gaps a person still has to decide on. Gaps are recorded, never applied. Absent when no run ever passed --network and none was carried forward; a flagless re-apply reads this back instead of dropping the target to the template's baseline, and verify_harness.py's check-10 grades domains and exclusions against the settings file.",
+      "properties": {
+        "vendors": {
+          "type": "array",
+          "description": "The detected vendors, in the detector's order.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "confidence"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "description": "The detector's vendor id, e.g. \"neon\"."
+              },
+              "confidence": {
+                "type": "string",
+                "description": "The detector's confidence, or \"unknown\" when it emitted none."
+              }
+            }
+          }
+        },
+        "domains": {
+          "type": "array",
+          "description": "The domains the fragment seeded into sandbox.network.allowedDomains.",
+          "items": {
+            "type": "string"
+          }
+        },
+        "excluded_commands": {
+          "type": "array",
+          "description": "The command patterns the fragment seeded into sandbox.excludedCommands.",
+          "items": {
+            "type": "string"
+          }
+        },
+        "gaps": {
+          "type": "array",
+          "description": "What the detector could not fix by seeding a domain \u2014 reported in the plan and recorded here, never written into settings.json.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "severity"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "description": "The detector's gap id, e.g. \"node-fetch-proxy\"."
+              },
+              "severity": {
+                "type": "string",
+                "description": "The detector's severity, or \"unknown\" when it emitted none."
+              }
+            }
+          }
+        },
+        "detected_at": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z$",
+          "description": "When the detector ran. Kept as recorded across a flagless re-apply, restamped by an explicit --network."
+        }
+      }
+    },
+    "allowlist": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "The verification commands the target repository DECLARES (#403), read by skills/harness-init/scripts/detect_toolchain.py from its package.json scripts map and its Makefile and seeded into .claude/settings.json's permissions.allow. Absent when no run ever passed --toolchain and none was carried forward. It exists because these rules used to be templated: templates/target-settings.json carried seven pnpm script rules lifted from one backend monorepo, and on acme-core five of them named nothing that existed. A flagless re-apply reads this back rather than dropping the target to the template's repo-independent baseline, and verify_harness.py's check-11 grades every Bash run-rule in the settings file against the repository's real script names.",
+      "properties": {
+        "runner": {
+          "type": "string",
+          "description": "The package-manager invocation the target's lockfile implies (\"pnpm\", \"npm\", \"yarn\", \"bun\"), or \"\" when the repository declares no Node scripts."
+        },
+        "runner_source": {
+          "type": "string",
+          "description": "The file that answered for the runner, e.g. \"pnpm-lock.yaml\". A package.json with no lockfile records the assumption explicitly rather than hiding it."
+        },
+        "commands": {
+          "type": "array",
+          "description": "The commands seeded into permissions.allow, without the Bash(...) wrapper.",
+          "items": {
+            "type": "string"
+          }
+        },
+        "refused": {
+          "type": "array",
+          "description": "The declared commands that were NOT allowlisted, with the reason. Recorded so a person asking why `pnpm run swagger:update` is absent reads the answer rather than re-running the detector.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "command",
+              "why"
+            ],
+            "properties": {
+              "command": {
+                "type": "string"
+              },
+              "why": {
+                "type": "string",
+                "description": "\"side effect: `update`\" or \"not a verification command\"."
+              }
+            }
+          }
+        },
+        "detected_at": {
+          "type": "string",
+          "description": "RFC 3339 UTC, when the payload was read. Absent on a manifest whose recorded stamp was unparseable."
+        }
+      }
+    },
+    "review": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "The record ADR-0005 D-1 requires before a repository's commits are reviewed automatically. D-1 adopts unattended per-commit egress PER REPOSITORY, on the record, so that the question \"which client code is reviewed automatically, by which provider\" is answered by a file rather than a memory. Absent means the repository is NOT registered, which is the default and is never inferred from stack detection. Its presence is not a grant: registration still requires a person, and D-1 is unambiguous that a provider is eligible only when it is already approved for that repository's INTERACTIVE work. Per Q-2 (answered 2026-09-09) what registration grants is an agent CLI with read access to the working tree, not a bounded diff, and payload_shape records that so an approval obtained against a narrower description cannot be mistaken for this one. Amended 2026-09-21 (ADR-0005 D-13): the block records a DECLINE as well as a registration, because an unregistered repository and one where nobody was ever asked were previously the same absence. `decision` says which; absent means \"registered\", so every record written before D-13 keeps validating and keeps meaning what it said.",
+      "required": [
+        "tool",
+        "date",
+        "who"
+      ],
+      "properties": {
+        "tool": {
+          "type": "string",
+          "description": "The review tool. \"roborev\" today; recorded rather than assumed so a second tool cannot land silently."
+        },
+        "pin": {
+          "type": "string",
+          "description": "The exact pinned version in force at registration, e.g. \"0.67.0\" (business rule 15). A bump is a PR, so this dates the record."
+        },
+        "agent": {
+          "type": "string",
+          "description": "The provider that performs the review, e.g. \"claude-code\". D-9 requires the installer to write this explicitly rather than inherit roborev's terminal fallback (`codex`), because a silent provider switch would defeat this record."
+        },
+        "date": {
+          "type": "string",
+          "format": "date-time",
+          "description": "When the repository was registered, ISO-8601."
+        },
+        "who": {
+          "type": "string",
+          "description": "The person who confirmed the registration. D-1 requires a person; this names them."
+        },
+        "payload_shape": {
+          "type": "string",
+          "description": "What the provider actually receives, in the words the approval was given in. Q-2's answer makes this load-bearing: diffs over the prompt budget are written to repo-local snapshot files the prompt points the agent at, and synthesis runs with read tools enabled, so the honest description is \"an agent CLI with read access to the working tree\" and NOT \"the diff\". A record saying the latter is inaccurate, and an approval obtained against it does not carry."
+        },
+        "approval_ref": {
+          "type": "string",
+          "description": "Optional pointer to where the provider approval for this repository is recorded (a ticket, a contract clause, a decision log entry). Optional because a repository the area owns outright may have no external artifact to cite; a client repository should."
+        },
+        "unregister": {
+          "type": "string",
+          "description": "The exact commands that undo this registration, so the reversal D-1 promises is written down at the moment it is granted rather than reconstructed later."
+        },
+        "decision": {
+          "type": "string",
+          "enum": [
+            "registered",
+            "declined"
+          ],
+          "description": "Which answer the person gave when harness-init put the registration decision to them (ADR-0005 D-13). \"declined\" is an ordinary outcome, not a failure, and is what makes \"asked and said no\" distinguishable from \"never asked\" \u2014 the distinction verify_harness.py check-7 grades. ABSENT means \"registered\": records written before D-13 predate the field and every one of them is a registration."
+        },
+        "reason": {
+          "type": "string",
+          "description": "Why registration was declined, in the person's own terms (a client agreement, a decision deferred, an approval not yet on file). Required when decision is \"declined\": a decline with no reason is indistinguishable from a mis-click, and the next run has nothing to re-open the question against."
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "decision": {
+                "const": "declined"
+              }
+            },
+            "required": [
+              "decision"
+            ]
+          },
+          "then": {
+            "required": [
+              "reason"
+            ]
+          },
+          "else": {
+            "required": [
+              "pin",
+              "agent",
+              "payload_shape"
+            ]
+          }
+        }
+      ]
+    },
+    "pr_review": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Which reviewers this repository's pull requests wait for (ENG-REV-01, business rule 5). Written by record_pr_review.py when harness-init or /pr-sync puts the question to a person; read by skills/pr-sync/scripts/review-mode.sh, which arms the PR watch with --bot <bot_login> (\"automata\"), --bot <bot_login> --collaborators off (\"automata_only\") or --bot none --min-approvals <n> (\"collaborators\"), or arms no watch (\"none\": PRs merge on green CI; the record then carries no bot_login and no min_approvals). Asked, never assumed: \"collaborators\" is an ordinary answer, and ABSENT means nobody was asked \u2014 the distinction verify_harness.py check-11 grades. Detection (skills/pr-sync/scripts/detect-reviewer.sh) is evidence offered to the person, never the record itself.",
+      "required": [
+        "reviewer",
+        "date",
+        "who"
+      ],
+      "properties": {
+        "reviewer": {
+          "type": "string",
+          "enum": [
+            "automata",
+            "automata_only",
+            "collaborators",
+            "none"
+          ],
+          "description": "\"automata\": Automata is set up as a reviewer on this repository's PRs, and its approval at the head is the verdict; collaborators' reviews are collected and worked too. \"automata_only\": the same verdict, but a collaborator's plain Comment review is reported and not worked -- their request for changes is still reported and still blocks, because GitHub blocks on it. \"collaborators\": no review bot; the verdict is min_approvals collaborator approvals at the head. \"none\": nothing waits for a review at all; the person merges on green CI, and the record then carries neither bot_login nor min_approvals."
+        },
+        "bot_login": {
+          "type": "string",
+          "description": "The review bot's GitHub login when reviewer is \"automata\" or \"automata_only\", e.g. automata-ai-bot. Absent on a collaborators record and on a none record."
+        },
+        "min_approvals": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 99,
+          "description": "Collaborator approvals (OWNER/MEMBER/COLLABORATOR, never the PR author, never a bot) a PR needs at its head in collaborators mode. Default 1. Recorded on an automata or automata_only record too, where it is informational: the bot's approval is the verdict there."
+        },
+        "evidence": {
+          "type": "string",
+          "description": "The detector's one-line summary the person answered against (bot seen on k of n recent PRs, required approvals from the branch rules), so the record says what it was decided on."
+        },
+        "date": {
+          "type": "string",
+          "format": "date-time",
+          "description": "When the answer was recorded, ISO-8601 UTC."
+        },
+        "who": {
+          "type": "string",
+          "description": "The person who answered."
+        }
+      }
+    },
+    "execution": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "What /dev-execution and /loop-mode need to know about this repository and cannot read off its tree (ENG-EXEC-01/05): the tracker that holds its tickets, and the autonomy gates its owners granted (the docs/LOOP-GATES.md vocabulary). Written by record_execution.py when harness-init Step 6c, /dev-execution or /loop-mode puts the question to a person; read by skills/dev-execution/scripts/execution_config.py. One file answers it (decided 2026-10-21): .loop/config.yaml is read only as a fallback where it exists, and a disagreement between the two stops the run. ABSENT means nobody was asked; verify_harness.py check-15 warns on it and fails a malformed record.",
+      "required": [
+        "tracker",
+        "date",
+        "who"
+      ],
+      "properties": {
+        "tracker": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type"
+          ],
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": [
+                "jira",
+                "youtrack",
+                "github",
+                "local"
+              ],
+              "description": "jira: Atlassian Rovo connector. youtrack: the user-scope youtrack skill's ytctl. github: gh issues, read only. local: the person hands in the spec (a file or pasted text)."
+            },
+            "project_key": {
+              "type": "string",
+              "pattern": "^[A-Za-z][A-Za-z0-9_]{0,31}$",
+              "description": "The project key the tickets carry (jira and youtrack only), e.g. ACME."
+            },
+            "done_states": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "string",
+                "minLength": 1
+              },
+              "description": "Tracker states that satisfy a blocker, e.g. [\"PR Merged\", \"Staging (TF)\", \"Done\"] on ACME, where a merged PR is not yet Done. Absent: the tracker's resolved states."
+            }
+          }
+        },
+        "gates": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "The autonomy gates, the docs/LOOP-GATES.md vocabulary. Absent: every escalation is a question and no fix cycle has a cap.",
+          "properties": {
+            "budget_gate": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "on_exceed"
+              ],
+              "properties": {
+                "on_exceed": {
+                  "type": "string",
+                  "enum": [
+                    "proceed",
+                    "abort",
+                    "escalate_silent"
+                  ]
+                }
+              }
+            },
+            "verifier_blocking_gate": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "on_blocking"
+              ],
+              "properties": {
+                "on_blocking": {
+                  "type": "string",
+                  "enum": [
+                    "auto_fix",
+                    "abort",
+                    "escalate_silent"
+                  ]
+                },
+                "auto_fix_max_retries": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 10
+                }
+              }
+            },
+            "adr_conflict_gate": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "on_high_conflict"
+              ],
+              "properties": {
+                "on_high_conflict": {
+                  "type": "string",
+                  "enum": [
+                    "proceed_with_record",
+                    "abort",
+                    "escalate_silent"
+                  ]
+                }
+              }
+            },
+            "adr_rule_violation_gate": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "on_violation"
+              ],
+              "properties": {
+                "on_violation": {
+                  "type": "string",
+                  "enum": [
+                    "abort"
+                  ]
+                }
+              }
+            },
+            "spec_clarification_gate": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "on_gaps"
+              ],
+              "properties": {
+                "on_gaps": {
+                  "type": "string",
+                  "enum": [
+                    "use_defaults_and_flag",
+                    "abort",
+                    "escalate_silent"
+                  ]
+                }
+              }
+            },
+            "self_healing_exhaust_gate": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "on_exhausted"
+              ],
+              "properties": {
+                "on_exhausted": {
+                  "type": "string",
+                  "enum": [
+                    "escalate_silent",
+                    "abort"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "gate_commands": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Per-role overrides for the verification commands an execution run gates on. A role left out is inferred from commands/allowlist and the repository's declared scripts; a role nothing fills is a named GAP, never substituted.",
+          "properties": {
+            "install": {
+              "type": "string",
+              "minLength": 1
+            },
+            "build": {
+              "type": "string",
+              "minLength": 1
+            },
+            "typecheck": {
+              "type": "string",
+              "minLength": 1
+            },
+            "lint": {
+              "type": "string",
+              "minLength": 1
+            },
+            "test": {
+              "type": "string",
+              "minLength": 1
+            },
+            "coverage": {
+              "type": "string",
+              "minLength": 1
+            },
+            "contract": {
+              "type": "string",
+              "minLength": 1
+            },
+            "e2e": {
+              "type": "string",
+              "minLength": 1
+            },
+            "secrets": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        "date": {
+          "type": "string",
+          "format": "date-time",
+          "description": "When the answer was recorded, ISO-8601 UTC."
+        },
+        "who": {
+          "type": "string",
+          "description": "The person who answered."
+        },
+        "evidence": {
+          "type": "string",
+          "description": "The detector's one-line summary the person answered against."
+        }
+      }
+    }
+  },
+  "examples": [
+    {
+      "schema_version": 1,
+      "generated_by": "somnio-engineering-ai@0.8.6.0",
+      "generated_at": "2026-09-04T12:00:00Z",
+      "rules_source": {
+        "repo": "somnio-software/somnio-ai-tools",
+        "rev": "ed8f9b6",
+        "path": "agent-rules/rules",
+        "tier": "owned-clone"
+      },
+      "stacks": [
+        "nestjs"
+      ],
+      "installed": [
+        {
+          "path": ".claude/rules/nestjs/testing-unit.md",
+          "origin": "somnio-software/somnio-ai-tools:ed8f9b6:agent-rules/rules/nestjs/testing-unit.md",
+          "source_rev": "ed8f9b6",
+          "sha256": "2b06d636354e0e78eb2373053fcfb5ad6d404b575a543f3dabe52e2c877626da",
+          "sha256_pre_optimize": "e24f4650c9f52b94049dbeedc3bdd46d1d481c0c2030477467853d7c162cc680"
+        }
+      ],
+      "pre_existing": [
+        "CLAUDE.md"
+      ],
+      "not_in_scope": [
+        "docs/uat/"
+      ],
+      "agents": [
+        "claude",
+        "codex"
+      ],
+      "settings_bak_created": true,
+      "cli_version": "2.11.2",
+      "cli_pin": "2.11.2",
+      "cli_installed": [
+        {
+          "agent": "claude",
+          "skill": "nestjs-best-practices",
+          "path": ".claude/skills/nestjs-best-practices",
+          "manifest": ".claude/skills/.somnio-skills.json"
+        }
+      ],
+      "objective": "The NestJS API behind the marketplace web app.",
+      "commands": [
+        {
+          "command": "pnpm test:cov",
+          "proves": "unit + integration, coverage gate"
+        }
+      ]
+    }
+  ]
+}

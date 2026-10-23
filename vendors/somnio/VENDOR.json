@@ -1,0 +1,14 @@
+{
+  "vendor": "somnio",
+  "upstream": {
+    "repo": "https://github.com/somnio-software/somnio-engineering-ai",
+    "commit": "510facec180a30205e9630956d76db344ba4d94b",
+    "version": "0.9.43",
+    "trees": {
+      "plugins/somnio-engineering-ai": "2e03d408d41b169144ad5d904b653410f51d4932",
+      "skills": "eb7ce2494313886e05e1a6fbf16ffde56b108ee9",
+      "templates": "a1a6bd77fba3089de9d2b3c33340f04b95b67e2f"
+    }
+  },
+  "transform": "scripts/import-somnio.sh"
+}

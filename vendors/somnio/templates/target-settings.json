@@ -1,0 +1,40 @@
+{
+  "_comment": "Commit this at .claude/settings.json in the target repo. A plugin cannot ship permissions; this is the second artifact a fully-harnessed repo needs. The deny list stops an agent reading secrets at all; the sandbox block makes that OS-enforced and prompt-free. excludedCommands and allowedDomains are per-repo. The two WebFetch(domain:...) allow rules also pre-allow sandboxed curl/git egress to GitHub. Rationale: docs/TARGET-REPO-SETUP.md in somnio-engineering-ai. env.GSTACK_SKIP_ASIDE=1 keeps gstack off the Aside real-browser driver and its third-party research agent until ADR-0009 is accepted; set it to \"0\" per repo only after that.",
+  "env": {
+    "GSTACK_SKIP_ASIDE": "1"
+  },
+  "_comment_allow": "Only rules that are true of EVERY repository live in permissions.allow. The target's own verification commands are read from its package.json scripts map and its Makefile by skills/harness-init/scripts/detect_toolchain.py and merged in as a fragment (template, then network, then commands, then the repo's own settings) -- they are never templated. Seven pnpm script rules used to sit in that list, lifted from one backend monorepo; five of them named nothing that existed in the next repo the template touched (acme-core, PR #403), and two were near-misses of the real names. A per-repo fact does not belong in a file every repo shares.",
+  "permissions": {
+    "deny": [
+      "Read(**/.env)", "Read(**/.env.*)", "Read(**/*.pem)", "Read(**/*.key)",
+      "Read(**/*.jks)", "Read(**/*.keystore)", "Read(**/*.p12)", "Read(**/*.pfx)",
+      "Read(**/service-account*.json)", "Read(**/*credentials*.json)",
+      "Edit(**/.env)", "Edit(**/.env.*)", "Edit(**/*.pem)", "Edit(**/*.key)",
+      "Edit(**/*.jks)", "Edit(**/*.keystore)", "Edit(**/*.p12)", "Edit(**/*.pfx)",
+      "Edit(**/service-account*.json)", "Edit(**/*credentials*.json)"
+    ],
+    "allow": [
+      "Bash(git status)", "Bash(git diff *)", "Bash(git log *)", "Bash(git branch)", "Bash(git show *)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:api.github.com)"
+  ],
+    "ask": [
+      "Bash(rm -rf *)", "Bash(terraform apply *)", "Bash(terraform destroy *)",
+      "Bash(git push --force *)", "Bash(git push -f *)"
+    ]
+  },
+  "sandbox": {
+    "enabled": true,
+    "autoAllowBashIfSandboxed": true,
+    "excludedCommands": [
+      "gh *", "gcloud *", "aws *", "az *", "flyctl *", "vercel *",
+      "kubectl *", "terraform *", "docker *", "open *", "osascript *",
+      "somnio-broker-gh *", "somnio-broker-gcloud *", "somnio-broker-aws *",
+      "somnio-broker-az *", "somnio-broker-flyctl *", "somnio-broker-vercel *",
+      "somnio-broker-kubectl *", "somnio-broker-terraform *"
+    ],
+    "network": {
+      "allowedDomains": ["registry.npmjs.org", "github.com", "api.github.com"]
+    }
+  }
+}

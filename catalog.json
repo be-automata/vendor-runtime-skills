@@ -1,0 +1,49 @@
+{
+  "schema": 1,
+  "vendors": {
+    "somnio": {
+      "root": "vendors/somnio",
+      "env": {
+        "CLAUDE_PLUGIN_ROOT": "{{root}}",
+        "YTCTL": "{{root}}/bin/ytctl"
+      },
+      "pathDirs": [
+        "{{root}}/bin"
+      ],
+      "headlessSafe": [
+        "dev-execution",
+        "harness-audit",
+        "optimize-context-rules",
+        "youtrack"
+      ],
+      "skills": [
+        "address-open-questions",
+        "dev-epic-refinement",
+        "dev-execution",
+        "harness-audit",
+        "harness-init",
+        "jira-ticket-hardening",
+        "loop-mode",
+        "optimize-context-rules",
+        "pr-sync",
+        "uat",
+        "worktree-recycle",
+        "youtrack"
+      ],
+      "agents": [
+        "agent-device",
+        "harness-analyzer",
+        "harness-orchestrator",
+        "harness-report-writer",
+        "production-validator",
+        "system-architect",
+        "tester"
+      ],
+      "commands": [
+        "device",
+        "doctor",
+        "harness-init"
+      ]
+    }
+  }
+}

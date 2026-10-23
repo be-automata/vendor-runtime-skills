@@ -1,0 +1,12 @@
+#!/bin/sh
+# YouTrack CLI for agent runs. Agents hold YOUTRACK_AGENT_TOKEN (an org's
+# YOUTRACK_TOKEN stays with the control plane); the vendor's ytctl reads
+# YOUTRACK_TOKEN, so map one onto the other and hand over.
+set -eu
+self=$(readlink -f -- "$0")
+root=$(dirname -- "$(dirname -- "$self")")
+if [ -n "${YOUTRACK_AGENT_TOKEN:-}" ]; then
+  YOUTRACK_TOKEN=$YOUTRACK_AGENT_TOKEN
+  export YOUTRACK_TOKEN
+fi
+exec "$root/skills/youtrack/scripts/ytctl" "$@"

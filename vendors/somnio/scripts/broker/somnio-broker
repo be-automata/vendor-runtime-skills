@@ -1,0 +1,161 @@
+#!/bin/sh
+# somnio-broker — the excluded wrapper binary of ADR-0004 D-3.
+#
+# WHAT THIS IS. A sandbox escape, on purpose. `excludedCommands` matches the Bash
+# command TEXT, so a script that wraps `gcloud` is still sandboxed and its call
+# fails (D-2). This binary is named in `excludedCommands` so that ONE fixed,
+# read-only probe per CLI can run outside the sandbox, and nothing else can.
+#
+# ONE IMPLEMENTATION, TEN NAMES. It dispatches on its own basename
+# (somnio-broker-<cli>), the busybox pattern. Ten copies of this logic is how
+# copy #7 drifts from copy #1, and each copy is a hole. `excludedCommands` still
+# matches the command TEXT, so `somnio-broker-gcloud *` grants gcloud and NOTHING
+# else — D-3's "one wrapper per CLI is the unit of adoption" is about exclusion
+# granularity, which the per-name dispatch preserves exactly.
+#
+# FIXED ARGV, NO PASS-THROUGH. The caller chooses a CLI and an operation name.
+# It never supplies an argument. Every argv is a constant read from
+# allowlist.json, which is lifted verbatim from check_infra_cli.py's PROVIDERS
+# and held identical to it by tests/broker/broker-test.sh. A caller that passes
+# anything beyond <op> is refused.
+#
+# WHAT THE HARDENING IS AND IS NOT — read this before trusting it.
+# It is real against: accidental scope creep, a skill quietly widening its own
+# exemption, drift between the prober and the broker, and a wrapper edited
+# without review. It is NOT a boundary against an attacker who already executes
+# as this user: the plugin directory and ~/.local/bin are user-writable, so
+# anyone with that much access can edit this file instead of abusing it. Stated
+# plainly in ADR-0004 D-3 rather than implied away. The value is auditability
+# and blast-radius limiting, not containment of a local attacker.
+set -u
+
+# THE BROKER'S PATH. A constant, never inherited from the caller — see the
+# security note at the exec below. /opt/homebrew/bin leads because Apple Silicon
+# puts every brew-installed CLI there; omitting it made the broker refuse to
+# find gcloud on most Macs in this area.
+# SOMNIO_BROKER_PATH_FOR_TESTS exists so the suite can point at fixture CLIs.
+# It is NOT a production escape: the doctor reports it as a finding if it is set
+# in a real session, and tests/broker/broker-test.sh asserts the production
+# default contains the six expected roots.
+BROKER_PATH="${SOMNIO_BROKER_PATH_FOR_TESTS:-/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$HOME/.local/bin}"
+
+# ME is the SYMLINK's name (that is the dispatch key); DIR is the REAL
+# implementation's directory, reached by resolving the symlink chain. They are
+# different on every real install: the entry points live on PATH while the
+# implementation and its allowlist stay in the plugin. Resolving $0 naively
+# looked for allowlist.json next to the symlink and refused every invocation —
+# which made every refusal test pass for the wrong reason.
+ME="$(basename "$0")"
+_resolve() {
+  _p="$1"; _n=0
+  while [ -L "$_p" ]; do
+    _n=$((_n+1)); [ "$_n" -gt 32 ] && { printf 'somnio-broker: symlink loop resolving %s\n' "$1" >&2; exit 64; }
+    _t="$(readlink "$_p")"
+    case "$_t" in /*) _p="$_t" ;; *) _p="$(dirname "$_p")/$_t" ;; esac
+  done
+  printf '%s' "$_p"
+}
+REAL="$(_resolve "$0")"
+DIR="$(cd "$(dirname "$REAL")" && pwd)"
+ALLOWLIST="$DIR/allowlist.json"
+
+die() { printf 'somnio-broker: %s\n' "$*" >&2; exit 64; }
+
+# Refuse an interpreter invocation. Business rule 18 forbids ever excluding an
+# interpreter, so this must be reached as `somnio-broker-<cli>` and never as
+# `sh .../somnio-broker`. Without this check the exclusion could be satisfied by
+# a command text nobody reviewed.
+case "$ME" in
+  somnio-broker-*) CLI="${ME#somnio-broker-}" ;;
+  *) die "invoke as somnio-broker-<cli>, never via an interpreter or by another name (got '$ME')" ;;
+esac
+
+[ -f "$ALLOWLIST" ] || die "allowlist.json not found beside the broker at $DIR"
+
+# Refuse to run from a group- or world-writable location. Does not stop the
+# owner (see the hardening note above); does stop a shared-machine mistake.
+# Position 6 of `ls -ld` is group-write, position 9 is other-write. Checked by
+# exact position, not a loose *w* glob, which also matches the owner bit and
+# would refuse every normal install.
+for p in "$DIR" "$REAL" "$ALLOWLIST"; do
+  [ -e "$p" ] || continue
+  perms="$(ls -ld "$p" 2>/dev/null | cut -c1-10)"
+  case "$perms" in
+    ?????w????) die "refusing to run: $p is group-writable ($perms)" ;;
+    ????????w?) die "refusing to run: $p is world-writable ($perms)" ;;
+  esac
+done
+
+OP="${1:-}"
+[ $# -le 1 ] || die "fixed argv: exactly one operation, no arguments (got $# )"
+case "$OP" in
+  version|auth) ;;
+  list-ops) ;;
+  "") die "usage: $ME <version|auth>" ;;
+  *) die "unknown operation '$OP' — allowed: version, auth" ;;
+esac
+
+# Resolve the constant argv. python3 is the repo's existing JSON reader; if it is
+# absent the broker refuses rather than guessing a command.
+command -v python3 >/dev/null 2>&1 || die "python3 is required to read the allowlist"
+
+if [ "$OP" = "list-ops" ]; then
+  python3 - "$ALLOWLIST" "$CLI" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))["providers"]
+for prov, spec in sorted(d.items()):
+    if spec["cli"] == sys.argv[2]:
+        for op in ("version", "auth"):
+            if spec.get(op):
+                print("%-8s %s" % (op, " ".join(spec[op])))
+PY
+  exit 0
+fi
+
+ARGS="$(python3 - "$ALLOWLIST" "$CLI" "$OP" <<'RESOLVE'
+import json, sys
+path, cli, op = sys.argv[1], sys.argv[2], sys.argv[3]
+providers = json.load(open(path))["providers"]
+match = [s for s in providers.values() if s["cli"] == cli]
+if not match:
+    sys.stderr.write("no allowlist entry for cli '%s'\n" % cli); sys.exit(3)
+if len(match) > 1:
+    sys.stderr.write("ambiguous: %d entries for cli '%s'\n" % (len(match), cli)); sys.exit(3)
+argv = match[0].get(op)
+if not argv:
+    sys.stderr.write("operation '%s' is not defined for '%s'\n" % (op, cli)); sys.exit(4)
+if argv[0] != cli:
+    sys.stderr.write("allowlist entry for '%s' does not start with it\n" % cli); sys.exit(5)
+for a in argv:
+    if any(ch.isspace() for ch in a):
+        sys.stderr.write("allowlisted argument contains whitespace: %r\n" % a); sys.exit(6)
+print("\n".join(argv[1:]))
+RESOLVE
+)" || die "no allowlisted '$OP' for '$CLI'"
+
+# Sanitised environment. The point of a broker is that the excluded process runs
+# a known command in a known environment, not whatever the caller arranged.
+#
+# PATH comes from BROKER_PATH, never the caller's. This is the security-critical
+# half: the broker runs OUTSIDE the sandbox, so a caller that controls PATH could
+# otherwise point `gcloud` at its own binary and get arbitrary unsandboxed
+# execution — a real privilege escalation, not a theoretical one.
+#
+# Accepted limit, recorded in ADR-0004 D-3: a CLI installed only behind a
+# version-manager shim (asdf, mise) is NOT on this list and is not brokered. The
+# broker fails closed naming the CLI, and /uat degrades to the person-confirms
+# path, which is D-3a's documented behaviour.
+PATH="$BROKER_PATH"; export PATH
+unset LD_PRELOAD LD_LIBRARY_PATH DYLD_INSERT_LIBRARIES DYLD_LIBRARY_PATH
+
+BIN="$(command -v "$CLI" 2>/dev/null)" || true
+[ -n "${BIN:-}" ] || { printf 'somnio-broker: %s is not on the broker PATH (%s)\n' "$CLI" "$BROKER_PATH" >&2; exit 127; }
+case "$BIN" in /*) ;; *) die "resolved '$CLI' to a non-absolute path: $BIN" ;; esac
+
+# Split on newline only. Safe because the resolver above refuses any allowlisted
+# argument containing whitespace.
+IFS='
+'
+set -- $ARGS
+unset IFS
+exec /usr/bin/env -u BASH_ENV -u ENV "$BIN" "$@"
